@@ -1,0 +1,28 @@
+name: Especificação
+description: Resultado de uma entrega, com critérios de aceite; as tarefas entram como sub-issues.
+type: Feature
+body:
+  - type: textarea
+    id: resultado
+    attributes:
+      label: Resultado
+      description: O que passa a ser possível ver ou fazer, em até duas frases.
+    validations:
+      required: true
+  - type: textarea
+    id: criterios
+    attributes:
+      label: Critérios de aceite
+      description: Poucos e verificáveis (o que se observa e onde), o mais importante primeiro.
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: fora
+    attributes:
+      label: Fora do escopo
+  - type: textarea
+    id: decisoes
+    attributes:
+      label: Decisões
+      description: Links para plano de arquitetura, event storming ou decisão registrada.

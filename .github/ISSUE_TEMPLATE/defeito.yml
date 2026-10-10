@@ -1,0 +1,25 @@
+name: Defeito
+description: Comportamento que difere do esperado.
+type: Bug
+body:
+  - type: textarea
+    id: observado
+    attributes:
+      label: Comportamento observado
+    validations:
+      required: true
+  - type: textarea
+    id: esperado
+    attributes:
+      label: Comportamento esperado
+    validations:
+      required: true
+  - type: textarea
+    id: reproduzir
+    attributes:
+      label: Como reproduzir
+  - type: textarea
+    id: evidencia
+    attributes:
+      label: Evidência
+      description: Mensagem de erro, tela ou registro, sem dado pessoal nem segredo.

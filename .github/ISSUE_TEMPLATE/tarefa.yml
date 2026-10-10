@@ -1,0 +1,26 @@
+name: Tarefa
+description: Uma mudança que se confere de uma vez e fecha com evidência própria.
+type: Task
+body:
+  - type: textarea
+    id: finalidade
+    attributes:
+      label: Finalidade
+      description: Uma frase ligada a um critério da especificação.
+    validations:
+      required: true
+  - type: textarea
+    id: criterios
+    attributes:
+      label: Critérios de aceite
+      description: Até cinco, verificáveis, o mais importante primeiro.
+      value: "- [ ] "
+    validations:
+      required: true
+  - type: textarea
+    id: evidencia
+    attributes:
+      label: Evidência exigida
+      description: O que precisa voltar para a tarefa ser aceita (comando e resultado, tela conferida, publicação).
+    validations:
+      required: true
