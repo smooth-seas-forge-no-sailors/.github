@@ -124,6 +124,7 @@ jobs:
           jq -e '
             type == "array" and length > 0 and all(.[];
               type == "string" and
+              (test("(^|/)\\.{1,2}(/|$)") | not) and
               (test("^deploy(?:/.*)?$") or test("^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]*compose[A-Za-z0-9._-]*\\.ya?ml$"))
             )' <<<"$ARQUIVOS" >/dev/null
           mapfile -t caminhos < <(jq -er '.[]' <<<"$ARQUIVOS")
