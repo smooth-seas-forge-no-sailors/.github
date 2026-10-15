@@ -185,8 +185,13 @@ jobs:
             [[ ${#manter[@]} -ge 1 && ${#manter[@]} -le 2 ]]
             pacote_url=$(jq -rn --arg valor "$pacote" '$valor | @uri')
             versoes=$(gh api --paginate "/orgs/$DONO/packages/container/$pacote_url/versions?per_page=100" | jq -s 'add')
-            jq -e 'length > 0 and all(.[]; (.name | test("^sha256:[0-9a-f]{64}$")) and (.metadata.container.tags | length > 0))' <<<"$versoes" >/dev/null || {
-              echo "limpeza recusada: o pacote $pacote contém manifesto composto ou parte sem nome" >&2
+            jq -e '
+              type == "array" and length > 0 and all(.[];
+                (.id | type == "number") and
+                (.name | test("^sha256:[0-9a-f]{64}$")) and
+                (.metadata.container.tags | type == "array" and all(.[]; type == "string"))
+              )' <<<"$versoes" >/dev/null || {
+              echo "limpeza recusada: resposta inválida para o pacote $pacote" >&2
               exit 1
             }
             for protegido in "${manter[@]}"; do
@@ -195,7 +200,9 @@ jobs:
                 exit 1
               }
             done
-            while IFS=$'\t' read -r id digest; do
+            removidas=0
+            preservadas=0
+            while IFS=$'\t' read -r id digest origem; do
               preservar=false
               for protegido in "${manter[@]}"; do
                 if [[ "$digest" == "$protegido" ]]; then
@@ -203,8 +210,23 @@ jobs:
                   break
                 fi
               done
-              if [[ "$preservar" == false ]]; then
-                gh api --method DELETE "/orgs/$DONO/packages/container/$pacote_url/versions/$id"
+              if [[ "$preservar" == true ]]; then
+                continue
               fi
-            done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$versoes")
+              if [[ "$origem" == stormlord ]]; then
+                gh api --method DELETE "/orgs/$DONO/packages/container/$pacote_url/versions/$id"
+                ((removidas += 1))
+              else
+                ((preservadas += 1))
+              fi
+            done < <(jq -r '.[] | [
+              .id,
+              .name,
+              if (.metadata.container.tags | length) > 0 and
+                 all(.metadata.container.tags[]; test("^[0-9a-f]{40}$"))
+              then "stormlord"
+              else "sem-origem-comprovada"
+              end
+            ] | @tsv' <<<"$versoes")
+            echo "retenção de $pacote: ${#manter[@]} versão(ões) ativa(s), $removidas antiga(s) removida(s), $preservadas sem origem comprovada preservada(s)"
           done <"$STORMLORD_CONSTRUCOES"
