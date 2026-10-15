@@ -7,66 +7,192 @@ on:
         description: Identificador do sistema
         required: true
         type: string
-      publicar:
-        description: Publicar depois do teste
-        default: false
-        type: boolean
-      ref:
-        description: Branch, tag ou versão exata
-        default: ""
+      imagens:
+        description: Imagens de produção, variáveis de teste e de implantação
+        required: true
+        type: string
+      arquivos_configuracao:
+        description: Caminhos versionados enviados ao publicador
+        required: true
+        type: string
+      verificador:
+        description: Script que inicia e valida as imagens já construídas
+        default: scripts/verificar-imagem.sh
         type: string
     secrets:
       STORMLORD_DEPLOY_HOST:
-        required: false
+        required: true
       STORMLORD_DEPLOY_KEY:
-        required: false
+        required: true
       STORMLORD_VPS1_KNOWN_HOSTS:
-        required: false
+        required: true
 
 permissions:
   contents: read
+  packages: write
 
 concurrency:
   group: stormlord-${{ inputs.sistema }}
   cancel-in-progress: false
 
 jobs:
-  validar:
+  publicar:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
-      - name: Baixar a versão solicitada
+      - name: Baixar a versão aprovada
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ inputs.ref != '' && inputs.ref || github.sha }}
 
-      - name: Validar identificador e testar
+      - name: Construir as imagens uma única vez
         env:
+          IMAGENS: ${{ inputs.imagens }}
           SISTEMA: ${{ inputs.sistema }}
         run: |
+          set -Eeuo pipefail
           [[ "$SISTEMA" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
-          docker build --target ci --file Dockerfile .
+          jq -e '
+            type == "array" and length > 0 and all(.[];
+              (.nome | test("^[a-z0-9][a-z0-9-]*$")) and
+              (.imagem | test("^ghcr\\.io/[a-z0-9-]+/[a-z0-9._-]+$")) and
+              (.contexto | test("^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$")) and
+              (.dockerfile | test("^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$")) and
+              (.variavel_teste | test("^[A-Z][A-Z0-9_]*$")) and
+              (.variavel_deploy | test("^[A-Z][A-Z0-9_]*$"))
+            )' <<<"$IMAGENS" >/dev/null
 
-      - name: Preparar acesso restrito
-        if: inputs.publicar
+          construcoes="$RUNNER_TEMP/stormlord-builds.jsonl"
+          : >"$construcoes"
+          while IFS= read -r especificacao; do
+            nome=$(jq -er '.nome' <<<"$especificacao")
+            contexto=$(jq -er '.contexto' <<<"$especificacao")
+            dockerfile=$(jq -er '.dockerfile' <<<"$especificacao")
+            alvo=$(jq -r '.alvo // ""' <<<"$especificacao")
+            variavel_teste=$(jq -er '.variavel_teste' <<<"$especificacao")
+            tag_local="stormlord-ci-${SISTEMA}-${nome}:${GITHUB_SHA}"
+            comando=(docker build --platform linux/amd64 --tag "$tag_local" --file "$dockerfile")
+            if [[ -n "$alvo" ]]; then
+              comando+=(--target "$alvo")
+            fi
+            while IFS= read -r argumento; do
+              [[ "$argumento" =~ ^[A-Z][A-Z0-9_]*=.+$ ]]
+              comando+=(--build-arg "$argumento")
+            done < <(jq -r '.argumentos[]?' <<<"$especificacao")
+            comando+=("$contexto")
+            "${comando[@]}"
+            jq -cn --argjson especificacao "$especificacao" --arg tag "$tag_local" \
+              '$especificacao + {tag_local: $tag}' >>"$construcoes"
+            printf '%s=%s\n' "$variavel_teste" "$tag_local" >>"$GITHUB_ENV"
+          done < <(jq -ec '.[]' <<<"$IMAGENS")
+          echo "STORMLORD_CONSTRUCOES=$construcoes" >>"$GITHUB_ENV"
+
+      - name: Iniciar e verificar exatamente as imagens de produção
+        env:
+          VERIFICADOR: ${{ inputs.verificador }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$VERIFICADOR" && "$VERIFICADOR" != /* && "$VERIFICADOR" != ".." && "$VERIFICADOR" != ../* && "$VERIFICADOR" != */../* && "$VERIFICADOR" != */.. ]]
+          test -f "$VERIFICADOR"
+          sh "$VERIFICADOR"
+
+      - name: Publicar por identificador imutável
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          imagens_env="$RUNNER_TEMP/stormlord.images.env"
+          : >"$imagens_env"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          while IFS= read -r especificacao; do
+            tag_local=$(jq -er '.tag_local' <<<"$especificacao")
+            imagem=$(jq -er '.imagem' <<<"$especificacao")
+            variavel_deploy=$(jq -er '.variavel_deploy' <<<"$especificacao")
+            tag_remota="${imagem}:${GITHUB_SHA}"
+            docker tag "$tag_local" "$tag_remota"
+            docker push "$tag_remota"
+            referencia=$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$tag_remota" | awk -v prefix="${imagem}@" 'index($0, prefix) == 1 { print; exit }')
+            [[ "$referencia" =~ ^ghcr\.io/[a-z0-9-]+/[a-z0-9._-]+@sha256:[0-9a-f]{64}$ ]]
+            printf '%s=%s\n' "$variavel_deploy" "$referencia" >>"$imagens_env"
+          done <"$STORMLORD_CONSTRUCOES"
+          echo "STORMLORD_IMAGENS_ENV=$imagens_env" >>"$GITHUB_ENV"
+
+      - name: Preparar somente a configuração de implantação
+        env:
+          ARQUIVOS: ${{ inputs.arquivos_configuracao }}
+        run: |
+          set -Eeuo pipefail
+          jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and test("^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"))' <<<"$ARQUIVOS" >/dev/null
+          mapfile -t caminhos < <(jq -er '.[]' <<<"$ARQUIVOS")
+          for caminho in "${caminhos[@]}"; do
+            git ls-files --error-unmatch -- "$caminho" >/dev/null
+          done
+          pacote="$RUNNER_TEMP/stormlord-config.tar"
+          git archive --format=tar --output="$pacote" "$GITHUB_SHA" -- "${caminhos[@]}"
+          test ! -e deploy/stormlord.images.env
+          install -m 0600 "$STORMLORD_IMAGENS_ENV" deploy/stormlord.images.env
+          tar --append --file="$pacote" deploy/stormlord.images.env
+          rm -f deploy/stormlord.images.env
+          echo "STORMLORD_PACOTE=$pacote" >>"$GITHUB_ENV"
+
+      - name: Preparar acesso restrito ao VPS 1
         env:
           CHAVE: ${{ secrets.STORMLORD_DEPLOY_KEY }}
           CONHECIDOS: ${{ secrets.STORMLORD_VPS1_KNOWN_HOSTS }}
           HOST: ${{ secrets.STORMLORD_DEPLOY_HOST }}
         run: |
+          set -Eeuo pipefail
           [[ -n "$CHAVE" && -n "$CONHECIDOS" && -n "$HOST" ]]
           install -d -m 0700 ~/.ssh
           install -m 0600 /dev/null ~/.ssh/stormlord
-          printf '%s\n' "$CHAVE" > ~/.ssh/stormlord
-          printf '%s\n' "$CONHECIDOS" > ~/.ssh/known_hosts
+          printf '%s\n' "$CHAVE" >~/.ssh/stormlord
+          printf '%s\n' "$CONHECIDOS" >~/.ssh/known_hosts
 
-      - name: Publicar a versão aprovada
-        if: inputs.publicar
+      - name: Implantar sem construir no servidor
         env:
+          GH_TOKEN: ${{ github.token }}
           HOST: ${{ secrets.STORMLORD_DEPLOY_HOST }}
           SISTEMA: ${{ inputs.sistema }}
         run: |
-          versao=$(git rev-parse HEAD)
-          git archive --format=tar "$versao" |
-            ssh -i ~/.ssh/stormlord -o IdentitiesOnly=yes "stormlord-deploy@$HOST" \
-              "implantar $SISTEMA $versao"
+          set -Eeuo pipefail
+          {
+            printf '%s\n' "$GITHUB_ACTOR"
+            printf '%s\n' "$GH_TOKEN"
+            cat "$STORMLORD_PACOTE"
+          } | ssh -i ~/.ssh/stormlord -o IdentitiesOnly=yes "stormlord-deploy@$HOST" \
+            "implantar $SISTEMA $GITHUB_SHA"
+          ssh -i ~/.ssh/stormlord -o IdentitiesOnly=yes "stormlord-deploy@$HOST" \
+            "estado $SISTEMA" >"$RUNNER_TEMP/stormlord-estado"
+          cat "$RUNNER_TEMP/stormlord-estado"
+
+      - name: Reter no registro somente a versão atual e a anterior
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DONO: ${{ github.repository_owner }}
+        run: |
+          set -Eeuo pipefail
+          mapfile -t referencias < <(awk '$1 == "imagem-atual" || $1 == "imagem-anterior" { print $2 }' "$RUNNER_TEMP/stormlord-estado")
+          while IFS= read -r especificacao; do
+            imagem=$(jq -er '.imagem' <<<"$especificacao")
+            pacote=${imagem#"ghcr.io/$DONO/"}
+            [[ "$pacote" != "$imagem" && "$pacote" =~ ^[a-z0-9._-]+$ ]]
+            mapfile -t manter < <(printf '%s\n' "${referencias[@]}" | awk -v prefix="${imagem}@" 'index($0, prefix) == 1 { sub(/^.*@/, ""); print }' | sort -u)
+            [[ ${#manter[@]} -ge 1 && ${#manter[@]} -le 2 ]]
+            pacote_url=$(jq -rn --arg valor "$pacote" '$valor | @uri')
+            versoes=$(gh api --paginate "/orgs/$DONO/packages/container/$pacote_url/versions?per_page=100" | jq -s 'add')
+            jq -e 'all(.[]; (.name | test("^sha256:[0-9a-f]{64}$")) and (.metadata.container.tags | length > 0))' <<<"$versoes" >/dev/null || {
+              echo "limpeza recusada: o pacote $pacote contém manifesto composto ou parte sem nome" >&2
+              exit 1
+            }
+            while IFS=$'\t' read -r id digest; do
+              preservar=false
+              for protegido in "${manter[@]}"; do
+                if [[ "$digest" == "$protegido" ]]; then
+                  preservar=true
+                  break
+                fi
+              done
+              if [[ "$preservar" == false ]]; then
+                gh api --method DELETE "/orgs/$DONO/packages/container/$pacote_url/versions/$id"
+              fi
+            done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$versoes")
+          done <"$STORMLORD_CONSTRUCOES"
