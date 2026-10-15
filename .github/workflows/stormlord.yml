@@ -121,7 +121,11 @@ jobs:
           ARQUIVOS: ${{ inputs.arquivos_configuracao }}
         run: |
           set -Eeuo pipefail
-          jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and test("^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"))' <<<"$ARQUIVOS" >/dev/null
+          jq -e '
+            type == "array" and length > 0 and all(.[];
+              type == "string" and
+              (test("^deploy(?:/.*)?$") or test("^(?:[A-Za-z0-9._-]+/)*[A-Za-z0-9._-]*compose[A-Za-z0-9._-]*\\.ya?ml$"))
+            )' <<<"$ARQUIVOS" >/dev/null
           mapfile -t caminhos < <(jq -er '.[]' <<<"$ARQUIVOS")
           for caminho in "${caminhos[@]}"; do
             git ls-files --error-unmatch -- "$caminho" >/dev/null
@@ -129,6 +133,7 @@ jobs:
           pacote="$RUNNER_TEMP/stormlord-config.tar"
           git archive --format=tar --output="$pacote" "$GITHUB_SHA" -- "${caminhos[@]}"
           test ! -e deploy/stormlord.images.env
+          mkdir -p deploy
           install -m 0600 "$STORMLORD_IMAGENS_ENV" deploy/stormlord.images.env
           tar --append --file="$pacote" deploy/stormlord.images.env
           rm -f deploy/stormlord.images.env
@@ -179,10 +184,16 @@ jobs:
             [[ ${#manter[@]} -ge 1 && ${#manter[@]} -le 2 ]]
             pacote_url=$(jq -rn --arg valor "$pacote" '$valor | @uri')
             versoes=$(gh api --paginate "/orgs/$DONO/packages/container/$pacote_url/versions?per_page=100" | jq -s 'add')
-            jq -e 'all(.[]; (.name | test("^sha256:[0-9a-f]{64}$")) and (.metadata.container.tags | length > 0))' <<<"$versoes" >/dev/null || {
+            jq -e 'length > 0 and all(.[]; (.name | test("^sha256:[0-9a-f]{64}$")) and (.metadata.container.tags | length > 0))' <<<"$versoes" >/dev/null || {
               echo "limpeza recusada: o pacote $pacote contém manifesto composto ou parte sem nome" >&2
               exit 1
             }
+            for protegido in "${manter[@]}"; do
+              [[ $(jq --arg digest "$protegido" '[.[] | select(.name == $digest)] | length' <<<"$versoes") -eq 1 ]] || {
+                echo "limpeza recusada: digest protegido ausente ou duplicado em $pacote" >&2
+                exit 1
+              }
+            done
             while IFS=$'\t' read -r id digest; do
               preservar=false
               for protegido in "${manter[@]}"; do
