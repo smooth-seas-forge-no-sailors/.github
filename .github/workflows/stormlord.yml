@@ -176,6 +176,7 @@ jobs:
           DONO: ${{ github.repository_owner }}
         run: |
           set -Eeuo pipefail
+          base=$( [ "$(gh api "/users/$DONO" --jq .type)" = "Organization" ] && echo orgs || echo users )
           mapfile -t referencias < <(awk '$1 == "imagem-atual" || $1 == "imagem-anterior" { print $2 }' "$RUNNER_TEMP/stormlord-estado")
           while IFS= read -r especificacao; do
             imagem=$(jq -er '.imagem' <<<"$especificacao")
@@ -184,7 +185,7 @@ jobs:
             mapfile -t manter < <(printf '%s\n' "${referencias[@]}" | awk -v prefix="${imagem}@" 'index($0, prefix) == 1 { sub(/^.*@/, ""); print }' | sort -u)
             [[ ${#manter[@]} -ge 1 && ${#manter[@]} -le 2 ]]
             pacote_url=$(jq -rn --arg valor "$pacote" '$valor | @uri')
-            versoes=$(gh api --paginate "/orgs/$DONO/packages/container/$pacote_url/versions?per_page=100" | jq -s 'add')
+            versoes=$(gh api --paginate "/$base/$DONO/packages/container/$pacote_url/versions?per_page=100" | jq -s 'add')
             jq -e '
               type == "array" and length > 0 and all(.[];
                 (.id | type == "number") and
@@ -214,7 +215,7 @@ jobs:
                 continue
               fi
               if [[ "$origem" == stormlord ]]; then
-                gh api --method DELETE "/orgs/$DONO/packages/container/$pacote_url/versions/$id"
+                gh api --method DELETE "/$base/$DONO/packages/container/$pacote_url/versions/$id"
                 ((removidas += 1))
               else
                 ((preservadas += 1))
