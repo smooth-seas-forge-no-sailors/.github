@@ -19,6 +19,10 @@ on:
         description: Script que inicia e valida as imagens já construídas
         default: scripts/verificar-imagem.sh
         type: string
+      dados:
+        description: Imagem opcional de dados somente leitura, com conteúdo apenas em /shared
+        default: ""
+        type: string
     secrets:
       STORMLORD_DEPLOY_HOST:
         required: true
@@ -84,6 +88,54 @@ jobs:
             printf '%s=%s\n' "$variavel_teste" "$tag_local" >>"$GITHUB_ENV"
           done < <(jq -ec '.[]' <<<"$IMAGENS")
           echo "STORMLORD_CONSTRUCOES=$construcoes" >>"$GITHUB_ENV"
+
+      - name: Construir e conferir a imagem de dados
+        if: inputs.dados != ''
+        env:
+          DADOS: ${{ inputs.dados }}
+          IMAGENS: ${{ inputs.imagens }}
+          SISTEMA: ${{ inputs.sistema }}
+        run: |
+          set -Eeuo pipefail
+          jq -e --argjson imagens "$IMAGENS" '
+            type == "object" and
+            (.imagem | test("^ghcr\\.io/[a-z0-9-]+/[a-z0-9._-]+$")) and
+            (.contexto | test("^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$")) and
+            (.dockerfile | test("^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$")) and
+            (.variavel_deploy | test("^[A-Z][A-Z0-9_]*$")) and
+            (.imagem as $imagem | .variavel_deploy as $variavel |
+              all($imagens[]; .imagem != $imagem and .variavel_deploy != $variavel))
+          ' <<<"$DADOS" >/dev/null
+          variavel=$(jq -er '.variavel_deploy' <<<"$DADOS")
+          jq -e --arg variavel "$variavel" '.dados == $variavel' deploy/stormlord.json >/dev/null || {
+            echo "deploy/stormlord.json precisa declarar \"dados\": \"$variavel\"" >&2
+            exit 1
+          }
+          tag_local="stormlord-ci-${SISTEMA}-dados:${GITHUB_SHA}"
+          docker build --platform linux/amd64 --tag "$tag_local" \
+            --file "$(jq -er '.dockerfile' <<<"$DADOS")" "$(jq -er '.contexto' <<<"$DADOS")"
+          # Mesma conferência do publicador: fora de /shared, só o que o Docker injeta no contêiner.
+          conteiner=$(docker create --network none "$tag_local" stormlord-dados)
+          docker export "$conteiner" | python3 -c '
+          import sys
+          import tarfile
+
+          permitidos = {".dockerenv", "dev", "dev/console", "dev/pts", "dev/shm", "etc", "etc/hostname",
+                        "etc/hosts", "etc/mtab", "etc/resolv.conf", "proc", "sys"}
+          encontrado = False
+          with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as pacote:
+              for membro in pacote:
+                  nome = membro.name.removeprefix("./").rstrip("/")
+                  if nome == "shared" or nome.startswith("shared/"):
+                      encontrado = True
+                  elif nome not in permitidos:
+                      raise SystemExit(f"imagem de dados com conteúdo fora de /shared: {nome}")
+          if not encontrado:
+              raise SystemExit("imagem de dados sem /shared")
+          '
+          docker rm "$conteiner" >/dev/null
+          jq -c --arg tag "$tag_local" '{nome: "dados", imagem, variavel_deploy, tag_local: $tag}' <<<"$DADOS" \
+            >>"$STORMLORD_CONSTRUCOES"
 
       - name: Iniciar e verificar exatamente as imagens de produção
         env:
